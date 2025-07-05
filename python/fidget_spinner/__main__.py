@@ -4,55 +4,32 @@ import typing
 
 import numpy as np
 import neuromorphic_drivers as nd
-import PySide6.QtQml
-import PySide6.QtGui
 import PySide6.QtCore
+import PySide6.QtGraphs
 
 from . import extension
 from . import ui
 
 
-class GraphModel(PySide6.QtCore.QAbstractTableModel):
-    def __init__(
-        self, values: np.ndarray, parent: typing.Optional[PySide6.QtCore.QObject] = None
-    ):
-        super().__init__(parent)
-        self.values = values
-
-    def rowCount(self, parent: PySide6.QtCore.QModelIndex):
-        return len(self.values)
-
-    def columnCount(self, parent: PySide6.QtCore.QModelIndex):
-        return 2
-
-    def data(self, index: PySide6.QtCore.QModelIndex, role):
-        return float(self.values[index.row(), index.column()])
-
-
 def camera_thread_target(
     device: nd.prophesee_evk4.DeviceOptional,
     event_display: ui.EventDisplay,
-    spectrum_model: GraphModel,
+    spectrum_line_series: PySide6.QtGraphs.QLineSeries,
 ):
     rpm_calculator = extension.RpmCalculator()
     spectrum = np.zeros(1000, dtype=np.float32)
-
-    import time
-    previous = time.monotonic()
-
     try:
         for status, packet in device:
             if packet is not None:
                 if "dvs_events" in packet:
                     assert status.ring is not None and status.ring.current_t is not None
                     rpms = rpm_calculator.process(packet["dvs_events"], spectrum)
-                    now = time.monotonic()
-                    if now - previous > 1.0:
-                        previous = now
-                        spectrum_model.values[:, 1] = spectrum
-                        spectrum_model.dataChanged.emit(
-                            spectrum_model.createIndex(0, 1),
-                            spectrum_model.createIndex(len(spectrum) - 1, 1),
+                    if rpms is not None:
+                        spectrum_line_series.replace(
+                            [
+                                PySide6.QtCore.QPointF(index, spectrum[index])
+                                for index in range(0, len(spectrum))
+                            ]
                         )
                     event_display.push(
                         events=packet["dvs_events"], current_t=status.ring.current_t
@@ -70,9 +47,6 @@ def camera_thread_target(
 def main():
     configuration = nd.prophesee_evk4.Configuration()
     device = nd.open(configuration=configuration, iterator_timeout=1.0 / 60.0)
-
-    spectrum_model = GraphModel(np.zeros((1000, 2), dtype=np.float64))
-    spectrum_model.values[:, 0] = np.arange(0, len(spectrum_model.values))
 
     biases_names = set(dataclasses.asdict(configuration.biases).keys())
 
@@ -116,7 +90,7 @@ def main():
 
     app = ui.App(
         f"""
-        import QtCharts
+        import QtGraphs
         import QtQuick
         import QtQuick.Layouts
         import QtQuick.Controls
@@ -151,37 +125,29 @@ def main():
                         }}
                     }}
 
-                    ChartView {{
-                        id: spectrumView
+                    GraphsView {{
                         Layout.fillHeight: true
                         Layout.fillWidth: true
                         Layout.minimumHeight: 400
                         Layout.maximumHeight: 400
 
-                        ValueAxis {{
-                            id: axisX
+                        axisX: ValueAxis {{
+                            id: xAxis
                             min: 0.0
                             max: 1000.0
                         }}
 
-                        ValueAxis {{
-                            id: axisY
+                        axisY: ValueAxis {{
+                            id: yAxis
                             min: 0.0
                             max: 1000.0
                         }}
 
                         LineSeries {{
-                            id: spectrum
-                            axisX: axisX
-                            axisY: axisY
-                        }}
+                            objectName: "spectrum"
+                            onPointsReplaced: {{
 
-                        VXYModelMapper {{
-                            id: modelMapper
-                            model: from_python.spectrum_model
-                            series: spectrum
-                            xColumn: 0
-                            yColumn: 1
+                            }}
                         }}
                     }}
                 }}
@@ -230,16 +196,15 @@ def main():
             }}
         }}
         """,
-        from_python_defaults={
-            "spectrum_model": spectrum_model,
-        },
+        from_python_defaults={},
         to_python=to_python,
     )
     event_display = app.event_display()
+    spectrum_line_series = app.line_series("spectrum")
     camera_thread = threading.Thread(
         target=camera_thread_target,
         daemon=True,
-        args=(device, event_display, spectrum_model),
+        args=(device, event_display, spectrum_line_series),
     )
     camera_thread.start()
     app.run()

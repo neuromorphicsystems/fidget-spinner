@@ -153,6 +153,9 @@ impl RpmCalculator {
                                 self.fft_sum[sample_index] += sample.re.abs();
                             }
                         }
+
+                        self.rpms.push(0.0); // @DEV
+
                         self.sample_index += 1;
                         self.next_sample_t =
                             (self.sample_index as f64 * (1e6 / SAMPLING_FREQUENCY)).round() as u64;

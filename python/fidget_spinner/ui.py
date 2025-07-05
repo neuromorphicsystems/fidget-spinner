@@ -2,15 +2,13 @@ import dataclasses
 import sys
 import typing
 
-import PySide6.QtCharts
 import numpy
 import PySide6.QtCore
-import PySide6.QtGraphs
 import PySide6.QtGui
 import PySide6.QtOpenGL
 import PySide6.QtQml
 import PySide6.QtQuick
-import PySide6.QtWidgets
+import PySide6.QtGraphs
 
 EventStyle = typing.Literal["exponential", "linear", "window"]
 FrameMode = typing.Literal["L", "RGB", "RGBA"]
@@ -1745,7 +1743,7 @@ class App:
         self.to_python = PySide6.QtQml.QQmlPropertyMap()
         if to_python is not None:
             self.to_python.valueChanged.connect(to_python)
-        self.app = PySide6.QtWidgets.QApplication(argv)
+        self.app = PySide6.QtGui.QGuiApplication(argv)
         PySide6.QtQuick.QQuickWindow.setGraphicsApi(
             PySide6.QtQuick.QSGRendererInterface.GraphicsApi.OpenGL
         )
@@ -1782,6 +1780,20 @@ class App:
             else:
                 raise Exception(
                     f'no FrameDisplay with name: "{object_name}" found in the QML tree'
+                )
+        return child
+
+    def line_series(self, object_name: typing.Optional[str] = None) -> PySide6.QtGraphs.QLineSeries:
+        if object_name is None:
+            child = self.window.findChild(PySide6.QtGraphs.QLineSeries)
+        else:
+            child = self.window.findChild(PySide6.QtGraphs.QLineSeries, name=object_name)
+        if child is None:
+            if object_name is None:
+                raise Exception(f"no PySide6.QtGraphs.QLineSeries found in the QML tree")
+            else:
+                raise Exception(
+                    f'no PySide6.QtGraphs.QLineSeries with name: "{object_name}" found in the QML tree'
                 )
         return child
 
