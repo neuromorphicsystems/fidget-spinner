@@ -1,0 +1,19 @@
+[package]
+edition = "2021"
+name = "python"
+resolver = "2"
+
+[lib]
+crate-type = ["cdylib"]
+name = "fidget_spinner"
+
+[dependencies]
+neuromorphic-types = "0.4.0"
+numpy = {version = "0.25.0"}
+pyo3 = {version = "0.25.1", features = ["extension-module"]}
+rustfft = "6.4.0"
+thiserror = "1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true

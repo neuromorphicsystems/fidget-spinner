@@ -1,0 +1,31 @@
+[project]
+dependencies = ["neuromorphic-drivers==0.13.3", "PySide6==6.9.1"]
+name = "fidget_spinner"
+readme = "README.md"
+requires-python = ">=3.9"
+version = "1.0.0"
+
+[build-system]
+build-backend = "maturin"
+requires = ["maturin==1.9.0"]
+
+[project.scripts]
+fidget-spinner = "fidget_spinner:__main__.main"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "fidget_spinner.extension"
+python-source = "python"
+
+[tool.pyright]
+exclude = ["**/__pycache__", "**/.*", "src"]
+executionEnvironments = [{root = ".", venv = ".venv"}]
+typeCheckingMode = "basic"
+
+[tool.isort]
+extend_skip = ["src"]
+profile = "black"
+sort_reexports = true
+
+[tool.black]
+extend-exclude = "src"
