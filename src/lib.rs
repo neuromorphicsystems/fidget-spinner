@@ -6,16 +6,17 @@ const WIDTH: u16 = 1280;
 const HEIGHT: u16 = 720;
 const SPATIAL_DOWNSAMPLING: u16 = 4;
 const SIGN_CHECK_RADIUS: u16 = 1;
-const ACTIVITY_TAU: u64 = 20000; // µs
+const ACTIVITY_TAU: u64 = 10000; // µs
 const TIMELINE_LENGTH: usize = 256;
 const SAMPLING_FREQUENCY: f64 = 10.0; // Hz
-const MOST_ACTIVE_TIMELINES_COUNT: usize = 40;
+const MOST_ACTIVE_TIMELINES_COUNT: usize = 32;
+const FFT_FREQUENCY: f64 = 512.0; // Hz
+const FFT_SAMPLES: usize = 1024; // samples
+const SKIP_LOW_FREQUENCY_SAMPLES: usize = 10; // (FFT_FREQUENCY / FFT_SAMPLES)
 
 const DOWNSAMPLED_WIDTH: u16 = WIDTH / SPATIAL_DOWNSAMPLING;
 const DOWNSAMPLED_HEIGHT: u16 = HEIGHT / SPATIAL_DOWNSAMPLING;
 const ACTIVITY_MU: f64 = -1.0 / (ACTIVITY_TAU as f64);
-const FFT_FREQUENCY: f64 = 1000.0; // Hz
-const FFT_SAMPLES: usize = 1000; // samples
 
 #[derive(Clone, Copy)]
 struct Timeline {
@@ -67,12 +68,14 @@ pub struct RpmCalculator {
     signs: Vec<Sign>,
     sample_index: usize,
     next_sample_t: u64,
-    rpms: Vec<f64>,
+    rpms: Vec<f32>,
     timelines_activities_and_indices: Vec<(f64, usize)>,
     fft_sum: Vec<f32>,
+    autocorrelation: Vec<f32>,
     fft_samples: Vec<rustfft::num_complex::Complex32>,
     fft_scratch: Vec<rustfft::num_complex::Complex32>,
-    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    fft_calculator: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    inverse_fft_calculator: std::sync::Arc<dyn rustfft::Fft<f32>>,
 }
 
 #[pymethods]
@@ -97,9 +100,11 @@ impl RpmCalculator {
             rpms: Vec::new(),
             timelines_activities_and_indices: vec![(0.0, 0); downsampled_length],
             fft_sum: vec![0.0; FFT_SAMPLES],
+            autocorrelation: vec![0.0; FFT_SAMPLES],
             fft_samples: vec![rustfft::num_complex::Complex32::default(); FFT_SAMPLES],
             fft_scratch: vec![rustfft::num_complex::Complex32::default(); FFT_SAMPLES],
-            fft: rustfft::FftPlanner::new().plan_fft_forward(FFT_SAMPLES),
+            fft_calculator: rustfft::FftPlanner::new().plan_fft_forward(FFT_SAMPLES),
+            inverse_fft_calculator: rustfft::FftPlanner::new().plan_fft_inverse(FFT_SAMPLES),
         })
     }
 
@@ -107,10 +112,19 @@ impl RpmCalculator {
         &mut self,
         events: &pyo3::Bound<'_, pyo3::types::PyAny>,
         spectrum: &pyo3::Bound<'_, numpy::PyArray1<f32>>,
-    ) -> PyResult<Option<Vec<f64>>> {
-        Python::with_gil(|python| -> PyResult<Option<Vec<f64>>> {
+        autocorrelation: &pyo3::Bound<'_, numpy::PyArray1<f32>>,
+        autocorrelation_detections: &pyo3::Bound<'_, numpy::PyArray1<f32>>,
+        amplitude_threshold: f32,
+        autocorrelation_threshold: f32,
+        frequency_multiplier: f32,
+    ) -> PyResult<Option<Vec<f32>>> {
+        Python::with_gil(|python| -> PyResult<Option<Vec<f32>>> {
             let (array, length) = check_array(python, ArrayType::Dvs, events)?;
             self.rpms.clear();
+            let mut autocorrelation_peak_start: f32 = -1.0;
+            let mut autocorrelation_peak_end: f32 = -1.0;
+            let mut autocorrelation_peak_frequency: f32 = -1.0;
+            let mut autocorrelation_peak_amplitude: f32 = 0.0;
             if length > 0 {
                 for index in 0..length {
                     let (t, x, y, polarity) = unsafe {
@@ -147,14 +161,109 @@ impl RpmCalculator {
                             .take(MOST_ACTIVE_TIMELINES_COUNT)
                         {
                             self.timelines[*index].fill(&mut self.fft_samples, t);
-                            self.fft
+                            self.fft_calculator
                                 .process_with_scratch(&mut self.fft_samples, &mut self.fft_scratch);
-                            for (sample_index, sample) in self.fft_samples.iter().enumerate() {
-                                self.fft_sum[sample_index] += sample.re.abs();
+                            for (sample_index, sample) in self
+                                .fft_samples
+                                .iter()
+                                .enumerate()
+                                .skip(SKIP_LOW_FREQUENCY_SAMPLES)
+                            {
+                                self.fft_sum[sample_index] += sample.norm_sqr().sqrt();
                             }
                         }
-
-                        self.rpms.push(0.0); // @DEV
+                        let mut maximum_amplitude: f32 = 0.0;
+                        for amplitude in self.fft_sum.iter_mut().skip(SKIP_LOW_FREQUENCY_SAMPLES) {
+                            *amplitude /= MOST_ACTIVE_TIMELINES_COUNT as f32;
+                            maximum_amplitude = maximum_amplitude.max(*amplitude);
+                        }
+                        {
+                            let zero_amplitude = self.fft_sum[SKIP_LOW_FREQUENCY_SAMPLES];
+                            for amplitude in
+                                self.fft_sum.iter_mut().take(SKIP_LOW_FREQUENCY_SAMPLES)
+                            {
+                                *amplitude = zero_amplitude;
+                            }
+                        }
+                        let variance_times_length = {
+                            let mut mean = 0.0;
+                            for (amplitude_index, amplitude) in self.fft_sum.iter().enumerate() {
+                                self.fft_samples[amplitude_index].re = *amplitude;
+                                self.fft_samples[amplitude_index].im = 0.0;
+                                mean += *amplitude;
+                            }
+                            mean /= FFT_SAMPLES as f32;
+                            let mut variance_times_length = 0.0;
+                            for fft_sample in self.fft_samples.iter_mut() {
+                                let delta = fft_sample.re - mean;
+                                variance_times_length += delta.powi(2);
+                                fft_sample.re = delta;
+                            }
+                            variance_times_length
+                        };
+                        if maximum_amplitude < amplitude_threshold || variance_times_length == 0.0 {
+                            self.autocorrelation.fill(0.0);
+                            self.autocorrelation[0] = 1.0;
+                            self.rpms.push(0.0);
+                        } else {
+                            self.fft_calculator
+                                .process_with_scratch(&mut self.fft_samples, &mut self.fft_scratch);
+                            for sample in self.fft_samples.iter_mut() {
+                                sample.re = sample.norm_sqr() / FFT_SAMPLES as f32;
+                                sample.im = 0.0;
+                            }
+                            self.inverse_fft_calculator
+                                .process_with_scratch(&mut self.fft_samples, &mut self.fft_scratch);
+                            for (sample_index, sample) in self.fft_samples.iter().enumerate() {
+                                self.autocorrelation[sample_index] =
+                                    sample.re / variance_times_length;
+                            }
+                            let mut on_peak = false;
+                            let mut maximum: Option<(usize, f32)> = None;
+                            for (sample, amplitude) in self
+                                .autocorrelation
+                                .iter()
+                                .enumerate()
+                                .take(FFT_SAMPLES / 2)
+                            {
+                                if on_peak {
+                                    match maximum {
+                                        Some((_, maximum_amplitude)) => {
+                                            if *amplitude < autocorrelation_threshold {
+                                                break;
+                                            }
+                                            if *amplitude > maximum_amplitude {
+                                                maximum = Some((sample, *amplitude));
+                                            }
+                                            autocorrelation_peak_end = (sample as f32
+                                                / FFT_SAMPLES as f32)
+                                                * FFT_FREQUENCY as f32;
+                                        }
+                                        None => {
+                                            if *amplitude >= autocorrelation_threshold {
+                                                autocorrelation_peak_start = (sample as f32
+                                                    / FFT_SAMPLES as f32)
+                                                    * FFT_FREQUENCY as f32;
+                                                maximum = Some((sample, *amplitude));
+                                            }
+                                        }
+                                    }
+                                } else if *amplitude < autocorrelation_threshold {
+                                    on_peak = true;
+                                }
+                            }
+                            match maximum {
+                                Some((sample, amplitude)) => {
+                                    autocorrelation_peak_frequency =
+                                        (sample as f32 / FFT_SAMPLES as f32) * FFT_FREQUENCY as f32;
+                                    autocorrelation_peak_amplitude = amplitude;
+                                    self.rpms.push(autocorrelation_peak_frequency * 60.0 * frequency_multiplier);
+                                }
+                                None => {
+                                    self.rpms.push(0.0);
+                                }
+                            }
+                        }
 
                         self.sample_index += 1;
                         self.next_sample_t =
@@ -220,17 +329,55 @@ impl RpmCalculator {
             }
             {
                 let mut array = unsafe { spectrum.as_array_mut() };
-                if array.len() != FFT_SAMPLES {
+                if array.len() != FFT_SAMPLES / 2 {
                     return Err(pyo3::exceptions::PyException::new_err(format!(
                         "spectrum must have {} elements (got {})",
-                        FFT_SAMPLES,
+                        FFT_SAMPLES / 2,
                         array.len()
                     )));
                 }
                 let slice = array.as_slice_mut().expect("spectrum is contiguous");
-                for (index, value) in self.fft_sum.iter().enumerate() {
+                for (index, value) in self.fft_sum.iter().take(FFT_SAMPLES / 2).enumerate() {
                     slice[index] = *value;
                 }
+            }
+            {
+                let mut autocorrelation = unsafe { autocorrelation.as_array_mut() };
+                if autocorrelation.len() != FFT_SAMPLES / 2 {
+                    return Err(pyo3::exceptions::PyException::new_err(format!(
+                        "autocorrelation must have {} elements (got {})",
+                        FFT_SAMPLES / 2,
+                        autocorrelation.len()
+                    )));
+                }
+                let slice = autocorrelation
+                    .as_slice_mut()
+                    .expect("autocorrelation is contiguous");
+                for (index, value) in self
+                    .autocorrelation
+                    .iter()
+                    .take(FFT_SAMPLES / 2)
+                    .enumerate()
+                {
+                    slice[index] = *value;
+                }
+            }
+            {
+                let mut autocorrelation_detections =
+                    unsafe { autocorrelation_detections.as_array_mut() };
+                if autocorrelation_detections.len() != 4 {
+                    return Err(pyo3::exceptions::PyException::new_err(format!(
+                        "autocorrelation_detections must have 4 elements (got {})",
+                        autocorrelation_detections.len()
+                    )));
+                }
+                let slice = autocorrelation_detections
+                    .as_slice_mut()
+                    .expect("autocorrelation_detections is contiguous");
+                slice[0] = autocorrelation_peak_start;
+                slice[1] = autocorrelation_peak_end;
+                slice[2] = autocorrelation_peak_frequency;
+                slice[3] = autocorrelation_peak_amplitude;
             }
             if self.rpms.is_empty() {
                 Ok(None)
