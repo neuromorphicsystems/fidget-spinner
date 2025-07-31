@@ -43,7 +43,7 @@ class Cursors:
 def camera_thread_target(
     algorithm_configuration: AlgorithmConfiguration,
     cursors: Cursors,
-    device: nd.prophesee_evk4.DeviceOptional,
+    device: nd.prophesee_evk4.PropheseeEvk4DeviceOptional,
     event_display: ui.EventDisplay,
     spectrum_line_series: PySide6.QtGraphs.QLineSeries,
     spectrum_amplitude_threshold_line_series: PySide6.QtGraphs.QLineSeries,
@@ -59,13 +59,7 @@ def camera_thread_target(
     rpms = np.zeros(300, dtype=np.float32)  # 30 s @ 10 Hz
     filtered_rpms = np.zeros(len(rpms), dtype=np.float32)
     first = True
-    while True:
-        try:
-            status, packet = device.__next__()
-        except (
-            TypeError
-        ):  # work-around for a bug in nd, fixed on main (awaiting next release)
-            continue
+    for status, packet in device:
         delay = status.delay()
         if (
             delay is not None
@@ -74,10 +68,10 @@ def camera_thread_target(
             device.clear_backlog(0)
         if first or not algorithm_configuration.pause:
             if packet is not None:
-                if "dvs_events" in packet:
+                if packet.polarity_events is not None:
                     assert status.ring is not None and status.ring.current_t is not None
                     new_rpms = rpm_calculator.process(
-                        packet["dvs_events"],
+                        packet.polarity_events,
                         spectrum,
                         autocorrelation,
                         autocorrelation_detections,
@@ -174,7 +168,7 @@ def camera_thread_target(
                             ]
                         )
                     event_display.push(
-                        events=packet["dvs_events"], current_t=status.ring.current_t
+                        events=packet.polarity_events, current_t=status.ring.current_t
                     )
                 elif status.ring is not None and status.ring.current_t is not None:
                     event_display.push(

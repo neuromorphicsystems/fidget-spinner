@@ -4,11 +4,11 @@ import typing
 
 import numpy
 import PySide6.QtCore
+import PySide6.QtGraphs
 import PySide6.QtGui
 import PySide6.QtOpenGL
 import PySide6.QtQml
 import PySide6.QtQuick
-import PySide6.QtGraphs
 
 EventStyle = typing.Literal["exponential", "linear", "window"]
 FrameMode = typing.Literal["L", "RGB", "RGBA"]
@@ -21,7 +21,7 @@ in vec2 vertices;
 out vec2 coordinates;
 
 void main() {
-    gl_Position = vec4(1.0 - vertices.x * 2.0, vertices.y * 2.0 - 1.0, 0.0, 1.0);
+    gl_Position = vec4(1.0 - vertices.x * 2.0, 1.0 - vertices.y * 2.0, 0.0, 1.0);
     coordinates = vertices;
 }
 """
@@ -950,32 +950,6 @@ class EventDisplayRenderer(PySide6.QtGui.QOpenGLFunctions):
                 self.program.colormap_split,
             )
             self.program.colormap_texture.bind(1)
-
-            # @DEV {
-            colormap_data = numpy.zeros(
-                (len(self.on_colormap) + len(self.off_colormap)) * 4,
-                dtype=numpy.float32,
-            )
-            index = 0
-            for color in reversed(self.off_colormap):
-                colormap_data[index] = color.redF()
-                colormap_data[index + 1] = color.greenF()
-                colormap_data[index + 2] = color.blueF()
-                colormap_data[index + 3] = color.alphaF()
-                index += 4
-            for color in self.on_colormap:
-                colormap_data[index] = color.redF()
-                colormap_data[index + 1] = color.greenF()
-                colormap_data[index + 2] = color.blueF()
-                colormap_data[index + 3] = color.alphaF()
-                index += 4
-            self.program.colormap_texture.setData(
-                PySide6.QtOpenGL.QOpenGLTexture.PixelFormat.RGBA,
-                PySide6.QtOpenGL.QOpenGLTexture.PixelType.Float32,
-                colormap_data,  # type: ignore
-            )
-            # }
-
             self.program.vertex_array_object.bind()
             self.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
             self.program.colormap_texture.release()
@@ -985,6 +959,7 @@ class EventDisplayRenderer(PySide6.QtGui.QOpenGLFunctions):
             self.window.endExternalCommands()
 
     def cleanup(self):
+        print("EventDisplayRenderer.cleanup called")  # @DEV
         return
         """
         if self.vbo:
@@ -1169,7 +1144,6 @@ class EventDisplay(PySide6.QtQuick.QQuickItem):
     def cleanup(self):
         if self._renderer is not None:
             self._renderer.cleanup()
-            del self._renderer
             self._renderer = None
 
     @PySide6.QtCore.Slot()
@@ -1483,6 +1457,7 @@ class FrameDisplayRenderer(PySide6.QtGui.QOpenGLFunctions):
             self.window.endExternalCommands()
 
     def cleanup(self):
+        print("FrameDisplayRenderer.cleanup called")  # @DEV
         return
         """
         if self.vbo:
@@ -1624,7 +1599,6 @@ class FrameDisplay(PySide6.QtQuick.QQuickItem):
     def cleanup(self):
         if self._renderer is not None:
             self._renderer.cleanup()
-            del self._renderer
             self._renderer = None
 
     @PySide6.QtCore.Slot()
@@ -1783,14 +1757,20 @@ class App:
                 )
         return child
 
-    def line_series(self, object_name: typing.Optional[str] = None) -> PySide6.QtGraphs.QLineSeries:
+    def line_series(
+        self, object_name: typing.Optional[str] = None
+    ) -> PySide6.QtGraphs.QLineSeries:
         if object_name is None:
             child = self.window.findChild(PySide6.QtGraphs.QLineSeries)
         else:
-            child = self.window.findChild(PySide6.QtGraphs.QLineSeries, name=object_name)
+            child = self.window.findChild(
+                PySide6.QtGraphs.QLineSeries, name=object_name
+            )
         if child is None:
             if object_name is None:
-                raise Exception(f"no PySide6.QtGraphs.QLineSeries found in the QML tree")
+                raise Exception(
+                    f"no PySide6.QtGraphs.QLineSeries found in the QML tree"
+                )
             else:
                 raise Exception(
                     f'no PySide6.QtGraphs.QLineSeries with name: "{object_name}" found in the QML tree'
