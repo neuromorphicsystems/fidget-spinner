@@ -1,5 +1,5 @@
 [project]
-dependencies = ["neuromorphic-drivers==0.15.0", "PySide6==6.9.1", "scipy==1.16"]
+dependencies = ["neuromorphic-drivers==0.16.1", "PySide6==6.10.0", "scipy==1.16.3"]
 name = "fidget_spinner"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -10,7 +10,7 @@ build-backend = "maturin"
 requires = ["maturin==1.9.0"]
 
 [project.scripts]
-fidget-spinner = "fidget_spinner:__main__.main"
+fidget-spinner = "fidget_spinner:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

@@ -5,7 +5,7 @@
 2. Install Python dependencies and build the extension.
 
 ```sh
-python3.12 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```

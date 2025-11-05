@@ -257,7 +257,11 @@ impl RpmCalculator {
                                     autocorrelation_peak_frequency =
                                         (sample as f32 / FFT_SAMPLES as f32) * FFT_FREQUENCY as f32;
                                     autocorrelation_peak_amplitude = amplitude;
-                                    self.rpms.push(autocorrelation_peak_frequency * 60.0 * frequency_multiplier);
+                                    self.rpms.push(
+                                        autocorrelation_peak_frequency
+                                            * 60.0
+                                            * frequency_multiplier,
+                                    );
                                 }
                                 None => {
                                     self.rpms.push(0.0);
@@ -390,10 +394,7 @@ impl RpmCalculator {
 
 #[pymodule]
 #[pyo3(name = "extension")]
-fn figet_spinner(
-    python: Python<'_>,
-    module: &pyo3::Bound<'_, pyo3::types::PyModule>,
-) -> PyResult<()> {
+fn figet_spinner(module: &pyo3::Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     module.add_class::<RpmCalculator>()?;
     Ok(())
 }
@@ -498,13 +499,19 @@ pub fn check_array(
                 expected_type: simple_description_to_string(python, expected_description),
                 actual_type: simple_description_to_string(python, actual_description),
             };
-            unsafe { pyo3::ffi::Py_DECREF(actual_field) };
+            unsafe {
+                pyo3::ffi::Py_DECREF(expected_description as *mut pyo3::ffi::PyObject);
+                pyo3::ffi::Py_DECREF(actual_field);
+            };
             return Err(error.into());
         }
         let actual_offset =
             unsafe { pyo3::ffi::PyLong_AsLong(pyo3::ffi::PyTuple_GetItem(actual_field, 1)) };
         if actual_offset != expected_offset {
-            unsafe { pyo3::ffi::Py_DECREF(actual_field) };
+            unsafe {
+                pyo3::ffi::Py_DECREF(actual_field);
+                pyo3::ffi::Py_DECREF(expected_description as *mut pyo3::ffi::PyObject);
+            }
             return Err(CheckArrayError::FieldOffset {
                 name: expected_field.name(),
                 actual_offset,
@@ -513,7 +520,10 @@ pub fn check_array(
             .into());
         }
         expected_offset += expected_field.size() as core::ffi::c_long;
-        unsafe { pyo3::ffi::Py_DECREF(actual_field) };
+        unsafe {
+            pyo3::ffi::Py_DECREF(actual_field);
+            pyo3::ffi::Py_DECREF(expected_description as *mut pyo3::ffi::PyObject);
+        }
     }
     let expected_fields_length = expected_fields.len();
     let actual_names = unsafe { numpy::npyffi::PyDataType_NAMES(python, (*array).descr) };
@@ -820,7 +830,7 @@ impl Fields {
         index
     }
 
-    pub fn iter(&self) -> FieldIterator {
+    pub fn iter(&'_ self) -> FieldIterator<'_> {
         FieldIterator {
             fields: self,
             index: 0,

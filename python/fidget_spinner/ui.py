@@ -959,7 +959,6 @@ class EventDisplayRenderer(PySide6.QtGui.QOpenGLFunctions):
             self.window.endExternalCommands()
 
     def cleanup(self):
-        print("EventDisplayRenderer.cleanup called")  # @DEV
         return
         """
         if self.vbo:
@@ -1457,7 +1456,6 @@ class FrameDisplayRenderer(PySide6.QtGui.QOpenGLFunctions):
             self.window.endExternalCommands()
 
     def cleanup(self):
-        print("FrameDisplayRenderer.cleanup called")  # @DEV
         return
         """
         if self.vbo:

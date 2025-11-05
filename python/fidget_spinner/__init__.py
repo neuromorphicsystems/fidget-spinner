@@ -14,6 +14,7 @@ from . import ui
 FFT_FREQUENCY: float = 512.0  # must be the same as FFT_FREQUENCY in src/lib.rs
 FFT_SAMPLES: int = 1024  # must be the same as FFT_SAMPLES in src/lib.rs
 SAMPLING_FREQUENCY: float = 10.0
+RPMS_LENGTH: int = 300
 # must be the same as SAMPLING_FREQUENCY in src/lib.rs
 
 MINIMUM_FILTER_SIZE: int = 5
@@ -30,6 +31,7 @@ class AlgorithmConfiguration:
     autocorrelation_threshold: int
     frequency_divider: int
     pause: bool
+    lock: PySide6.QtCore.QMutex
 
 
 @dataclasses.dataclass
@@ -38,35 +40,47 @@ class Cursors:
     autocorrelation: float
     rpms: float
     changed: bool
+    lock: PySide6.QtCore.QMutex
+
+
+@dataclasses.dataclass
+class Draw:
+    spectrum: np.ndarray
+    autocorrelation: np.ndarray
+    autocorrelation_detections: np.ndarray
+    filtered_rpms: np.ndarray
+    amplitude_threshold: int
+    changed: bool
+    lock: PySide6.QtCore.QMutex
 
 
 def camera_thread_target(
     algorithm_configuration: AlgorithmConfiguration,
-    cursors: Cursors,
     device: nd.prophesee_evk4.PropheseeEvk4DeviceOptional,
     event_display: ui.EventDisplay,
-    spectrum_line_series: PySide6.QtGraphs.QLineSeries,
-    spectrum_amplitude_threshold_line_series: PySide6.QtGraphs.QLineSeries,
-    autocorrelation_line_series: PySide6.QtGraphs.QLineSeries,
-    autocorrelation_threshold_line_series: PySide6.QtGraphs.QLineSeries,
-    autocorrelation_detection_line_series: PySide6.QtGraphs.QLineSeries,
-    rpms_line_series: PySide6.QtGraphs.QLineSeries,
+    draw: Draw,
 ):
     rpm_calculator = extension.RpmCalculator()
     spectrum = np.zeros(FFT_SAMPLES // 2, dtype=np.float32)
     autocorrelation = np.zeros(FFT_SAMPLES // 2, dtype=np.float32)
     autocorrelation_detections = np.zeros(4, dtype=np.float32)
-    rpms = np.zeros(300, dtype=np.float32)  # 30 s @ 10 Hz
+    rpms = np.zeros(RPMS_LENGTH, dtype=np.float32)  # 30 s @ 10 Hz
     filtered_rpms = np.zeros(len(rpms), dtype=np.float32)
     first = True
+
     for status, packet in device:
         delay = status.delay()
-        if (
-            delay is not None
-            and delay * 1000.0 > algorithm_configuration.maximum_latency_ms
-        ):
+        with PySide6.QtCore.QMutexLocker(algorithm_configuration.lock):
+            amplitude_threshold = algorithm_configuration.amplitude_threshold
+            autocorrelation_threshold = (
+                algorithm_configuration.autocorrelation_threshold
+            )
+            maximum_latency_ms = algorithm_configuration.maximum_latency_ms
+            frequency_divider = algorithm_configuration.frequency_divider
+            pause = algorithm_configuration.pause
+        if delay is not None and delay * 1000.0 > maximum_latency_ms:
             device.clear_backlog(0)
-        if first or not algorithm_configuration.pause:
+        if first or not pause:
             if packet is not None:
                 if packet.polarity_events is not None:
                     assert status.ring is not None and status.ring.current_t is not None
@@ -75,75 +89,12 @@ def camera_thread_target(
                         spectrum,
                         autocorrelation,
                         autocorrelation_detections,
-                        algorithm_configuration.amplitude_threshold / 10.0,
-                        algorithm_configuration.autocorrelation_threshold / 100.0,
-                        1.0 / algorithm_configuration.frequency_divider,
+                        amplitude_threshold / 10.0,
+                        autocorrelation_threshold / 100.0,
+                        1.0 / frequency_divider,
                     )
                     if first or new_rpms is not None:
                         first = False
-                        cursors.changed = True
-                        spectrum_line_series.replace(
-                            [
-                                PySide6.QtCore.QPointF(
-                                    index * FFT_FREQUENCY / FFT_SAMPLES,
-                                    spectrum[index],
-                                )
-                                for index in range(0, len(spectrum))
-                            ]
-                        )
-                        spectrum_line_series.setProperty(
-                            "maximum", float(spectrum.max())
-                        )
-                        spectrum_amplitude_threshold_line_series.replace(
-                            [
-                                PySide6.QtCore.QPointF(
-                                    0.0,
-                                    algorithm_configuration.amplitude_threshold / 10.0,
-                                ),
-                                PySide6.QtCore.QPointF(
-                                    FFT_FREQUENCY / 2,
-                                    algorithm_configuration.amplitude_threshold / 10.0,
-                                ),
-                            ]
-                        )
-                        autocorrelation_line_series.replace(
-                            [
-                                PySide6.QtCore.QPointF(
-                                    index * FFT_FREQUENCY / FFT_SAMPLES,
-                                    autocorrelation[index],
-                                )
-                                for index in range(0, len(autocorrelation))
-                            ]
-                        )
-                        autocorrelation_threshold_line_series.replace(
-                            [
-                                PySide6.QtCore.QPointF(
-                                    0.0,
-                                    algorithm_configuration.autocorrelation_threshold
-                                    / 100.0,
-                                ),
-                                PySide6.QtCore.QPointF(
-                                    FFT_FREQUENCY / 2,
-                                    algorithm_configuration.autocorrelation_threshold
-                                    / 100.0,
-                                ),
-                            ]
-                        )
-                        if autocorrelation_detections[2] >= 0.0:
-                            autocorrelation_detection_line_series.replace(
-                                [
-                                    PySide6.QtCore.QPointF(
-                                        autocorrelation_detections[2],
-                                        -0.5,
-                                    ),
-                                    PySide6.QtCore.QPointF(
-                                        autocorrelation_detections[2],
-                                        autocorrelation_detections[3],
-                                    ),
-                                ]
-                            )
-                        else:
-                            autocorrelation_detection_line_series.replace([])
                         if new_rpms is not None:
                             rpms[0 : -len(new_rpms)] = rpms[len(new_rpms) :]
                             rpms[-len(new_rpms) :] = new_rpms
@@ -153,20 +104,15 @@ def camera_thread_target(
                             output=filtered_rpms,
                             mode="nearest",
                         )
-                        rpms_line_series.setProperty(
-                            "maximum", max(float(filtered_rpms.max()), 1.0)
-                        )
-                        rpms_line_series.setProperty(
-                            "current", float(filtered_rpms[-1])
-                        )
-                        rpms_line_series.replace(
-                            [
-                                PySide6.QtCore.QPointF(
-                                    index / SAMPLING_FREQUENCY, filtered_rpms[index]
-                                )
-                                for index in range(0, len(filtered_rpms))
-                            ]
-                        )
+                        with PySide6.QtCore.QMutexLocker(draw.lock):
+                            draw.spectrum[:] = spectrum
+                            draw.autocorrelation[:] = autocorrelation
+                            draw.autocorrelation_detections[:] = (
+                                autocorrelation_detections
+                            )
+                            draw.filtered_rpms[:] = filtered_rpms
+                            draw.amplitude_threshold = amplitude_threshold
+                            draw.changed = True
                     event_display.push(
                         events=packet.polarity_events, current_t=status.ring.current_t
                     )
@@ -174,27 +120,10 @@ def camera_thread_target(
                     event_display.push(
                         events=np.array([]), current_t=status.ring.current_t
                     )
-        if cursors.changed:
-            spectrum_line_series.setProperty(
-                "cursor",
-                float(spectrum[int(round((len(spectrum) - 1) * cursors.spectrum))]),
-            )
-            autocorrelation_line_series.setProperty(
-                "cursor",
-                float(
-                    autocorrelation[
-                        int(round((len(autocorrelation) - 1) * cursors.autocorrelation))
-                    ]
-                ),
-            )
-            rpms_line_series.setProperty(
-                "cursor",
-                float(rpms[int(round((len(rpms) - 1) * cursors.rpms))]),
-            )
-            cursors.changed = False
 
 
 def main():
+    nd.print_device_list()
     configuration = nd.prophesee_evk4.Configuration()
     algorithm_configuration = AlgorithmConfiguration(
         maximum_latency_ms=DEFAULT_MAXIMUM_LATENCY,
@@ -202,15 +131,25 @@ def main():
         autocorrelation_threshold=DEFAULT_AUTOCORRELATION_THRESHOLD,
         frequency_divider=DEFAULT_FREQUENCY_DIVIDER,
         pause=False,
+        lock=PySide6.QtCore.QMutex(),
     )
     cursors = Cursors(
         spectrum=0.0,
         autocorrelation=0.0,
         rpms=0.0,
         changed=False,
+        lock=PySide6.QtCore.QMutex(),
+    )
+    draw = Draw(
+        spectrum=np.zeros(FFT_SAMPLES // 2, dtype=np.float32),
+        autocorrelation=np.zeros(FFT_SAMPLES // 2, dtype=np.float32),
+        autocorrelation_detections=np.zeros(4, dtype=np.float32),
+        filtered_rpms=np.zeros(RPMS_LENGTH, dtype=np.float32),
+        amplitude_threshold=DEFAULT_AMPLITUDE_THRESHOLD,
+        changed=False,
+        lock=PySide6.QtCore.QMutex(),
     )
     device = nd.open(configuration=configuration, iterator_timeout=1.0 / 60.0)
-
     biases_names = set(dataclasses.asdict(configuration.biases).keys())
 
     def to_python(key: str, value: typing.Any):
@@ -229,16 +168,19 @@ def main():
             algorithm_configuration.pause = value
         elif key == "spectrum_cursor":
             if isinstance(value, (int, float)) and value >= 0.0 and value <= 1.0:
-                cursors.spectrum = value
-                cursors.changed = True
+                with PySide6.QtCore.QMutexLocker(cursors.lock):
+                    cursors.spectrum = value
+                    cursors.changed = True
         elif key == "autocorrelation_cursor":
             if isinstance(value, (int, float)) and value >= 0.0 and value <= 1.0:
-                cursors.autocorrelation = value
-                cursors.changed = True
+                with PySide6.QtCore.QMutexLocker(cursors.lock):
+                    cursors.autocorrelation = value
+                    cursors.changed = True
         elif key == "rpms_cursor":
             if isinstance(value, (int, float)) and value >= 0.0 and value <= 1.0:
-                cursors.rpms = value
-                cursors.changed = True
+                with PySide6.QtCore.QMutexLocker(cursors.lock):
+                    cursors.rpms = value
+                    cursors.changed = True
         else:
             print(f"Unknown to_python key {key} with value {value}")
 
@@ -907,20 +849,131 @@ def main():
     autocorrelation_threshold_line_series = app.line_series("autocorrelation_threshold")
     autocorrelation_detection_line_series = app.line_series("autocorrelation_detection")
     rpms_line_series = app.line_series("rpms")
+
+    def update_series():
+        draw_series = False
+        draw_cursors = False
+        with PySide6.QtCore.QMutexLocker(draw.lock):
+            if draw.changed:
+                draw.changed = False
+                draw_series = True
+                draw_cursors = True
+                spectrum_lines = [
+                    PySide6.QtCore.QPointF(
+                        index * FFT_FREQUENCY / FFT_SAMPLES,
+                        draw.spectrum[index],
+                    )
+                    for index in range(0, len(draw.spectrum))
+                ]
+                spectrum_lines_maximum = float(draw.spectrum.max())
+                spectrum_amplitude_threshold_lines = [
+                    PySide6.QtCore.QPointF(
+                        0.0,
+                        draw.amplitude_threshold / 10.0,
+                    ),
+                    PySide6.QtCore.QPointF(
+                        FFT_FREQUENCY / 2,
+                        draw.amplitude_threshold / 10.0,
+                    ),
+                ]
+                autocorrelation_lines = [
+                    PySide6.QtCore.QPointF(
+                        index * FFT_FREQUENCY / FFT_SAMPLES,
+                        draw.autocorrelation[index],
+                    )
+                    for index in range(0, len(draw.autocorrelation))
+                ]
+                autocorrelation_threshold_lines = [
+                    PySide6.QtCore.QPointF(
+                        0.0,
+                        algorithm_configuration.autocorrelation_threshold / 100.0,
+                    ),
+                    PySide6.QtCore.QPointF(
+                        FFT_FREQUENCY / 2,
+                        algorithm_configuration.autocorrelation_threshold / 100.0,
+                    ),
+                ]
+                if draw.autocorrelation_detections[2] >= 0.0:
+                    autocorrelation_detection_lines = [
+                        PySide6.QtCore.QPointF(
+                            draw.autocorrelation_detections[2],
+                            -0.5,
+                        ),
+                        PySide6.QtCore.QPointF(
+                            draw.autocorrelation_detections[2],
+                            draw.autocorrelation_detections[3],
+                        ),
+                    ]
+                else:
+                    autocorrelation_detection_lines = []
+                rpms_lines_maximum = max(float(draw.filtered_rpms.max()), 1.0)
+                rpms_lines_current = float(draw.filtered_rpms[-1])
+                rpms_lines = [
+                    PySide6.QtCore.QPointF(
+                        index / SAMPLING_FREQUENCY, draw.filtered_rpms[index]
+                    )
+                    for index in range(0, len(draw.filtered_rpms))
+                ]
+
+            with PySide6.QtCore.QMutexLocker(cursors.lock):
+                if cursors.changed or draw_cursors:
+                    cursors.changed = False
+                    draw_cursors = True
+                    spectrum_lines_cursor = float(
+                        draw.spectrum[
+                            int(round((len(draw.spectrum) - 1) * cursors.spectrum))
+                        ]
+                    )
+                    autocorrelation_lines_cursor = float(
+                        draw.autocorrelation[
+                            int(
+                                round(
+                                    (len(draw.autocorrelation) - 1)
+                                    * cursors.autocorrelation
+                                )
+                            )
+                        ]
+                    )
+                    rpms_lines_cursor = float(
+                        draw.filtered_rpms[
+                            int(round((len(draw.filtered_rpms) - 1) * cursors.rpms))
+                        ]
+                    )
+        if draw_cursors:
+            spectrum_line_series.setProperty("cursor", spectrum_lines_cursor)
+            autocorrelation_line_series.setProperty(
+                "cursor", autocorrelation_lines_cursor
+            )
+            rpms_line_series.setProperty("cursor", rpms_lines_cursor)
+        if draw_series:
+            spectrum_line_series.replace(spectrum_lines)
+            spectrum_line_series.setProperty("maximum", spectrum_lines_maximum)
+            spectrum_amplitude_threshold_line_series.replace(
+                spectrum_amplitude_threshold_lines
+            )
+            autocorrelation_line_series.replace(autocorrelation_lines)
+            autocorrelation_threshold_line_series.replace(
+                autocorrelation_threshold_lines
+            )
+            autocorrelation_detection_line_series.replace(
+                autocorrelation_detection_lines
+            )
+            rpms_line_series.setProperty("maximum", rpms_lines_maximum)
+            rpms_line_series.setProperty("current", rpms_lines_current)
+            rpms_line_series.replace(rpms_lines)
+
+    timer = PySide6.QtCore.QTimer()
+    timer.timeout.connect(update_series)
+    timer.start(10)
+
     camera_thread = threading.Thread(
         target=camera_thread_target,
         daemon=True,
         args=(
             algorithm_configuration,
-            cursors,
             device,
             event_display,
-            spectrum_line_series,
-            spectrum_amplitude_threshold_line_series,
-            autocorrelation_line_series,
-            autocorrelation_threshold_line_series,
-            autocorrelation_detection_line_series,
-            rpms_line_series,
+            draw,
         ),
     )
     camera_thread.start()
